@@ -1,0 +1,6 @@
+*/*.o
+build/
+*.code-workspace
+valgrind-out.txt
+.vscode/ipch/
+gpsstats.cfg
