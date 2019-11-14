@@ -21,6 +21,7 @@
 #include "gpsstats.h"
 #include "logging.h"
 #include "timespec.h"
+#include "util.h"
 
 #define MAX_RECONNECT_DELAY_VALUE 32
 
@@ -338,6 +339,13 @@ int main(int argc, char *argv[]) {
     }
 
     dump_config(run_state.config);
+
+    if (!foreground) {
+        int retval = daemonize(pid_file, run_state.config->priv_user, run_state.config->priv_group);
+        if (retval) {
+            exit(retval);
+        }
+    }
 
     run_state.mosq = mosquitto_new(run_state.config->client_id, true /* clean session */, NULL);
     if (!run_state.mosq) {
