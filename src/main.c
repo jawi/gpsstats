@@ -31,8 +31,11 @@
 typedef struct {
     config_t *config;
     struct mosquitto *mosq;
+    struct gps_data_t *gpsd;
 
     bool reconnect_mosq;
+    bool reconnect_gpsd;
+
     time_t next_reconnect_attempt;
     uint32_t next_delay_value;
 
@@ -271,11 +274,57 @@ static void dump_config(config_t *config) {
     }
 }
 
+static int connect_gpsd(void) {
+    unsigned int flags = WATCH_ENABLE | WATCH_NEWSTYLE | WATCH_JSON | WATCH_PPS | WATCH_TIMING;
+
+    if (gps_open(run_state.config->gpsd_host, run_state.config->gpsd_port, run_state.gpsd)) {
+        log_error("no gpsd running or network error: %d, %s", errno, gps_errstr(errno));
+        return -1;
+    }
+
+    if (run_state.config->gpsd_device) {
+        flags |= WATCH_DEVICE;
+    }
+
+    if (gps_stream(run_state.gpsd, flags, run_state.config->gpsd_device)) {
+        log_error("failed to set GPS stream options: %d, %s", errno, gps_errstr(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+static int reconnect_gpsd(void) {
+    time_t now = time(NULL);
+    if (run_state.reconnect_gpsd && run_state.next_reconnect_attempt >= now) {
+        return 1;
+    }
+
+    run_state.reconnect_gpsd = true;
+    int status = connect_gpsd();
+    if (status) {
+        log_debug("failed to reconnect to GPSD");
+
+        run_state.next_reconnect_attempt = now + run_state.next_delay_value;
+
+        if (run_state.next_delay_value < MAX_RECONNECT_DELAY_VALUE) {
+            run_state.next_delay_value <<= 1;
+        }
+
+        return -1;
+    }
+
+    run_state.reconnect_gpsd = false;
+    run_state.next_reconnect_attempt = -1L;
+    run_state.next_delay_value = 1;
+
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     int timeout = 250; // milliseconds
+    uint8_t gps_error_cnt = 0;
     int status;
-    unsigned int flags = WATCH_ENABLE | WATCH_NEWSTYLE | WATCH_JSON | WATCH_PPS | WATCH_TIMING;
-    struct gps_data_t data = { 0 };
 
     // parse arguments...
     char *conf_file = NULL;
@@ -347,6 +396,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    run_state.gpsd = malloc(sizeof(struct gps_data_t));
+    if (run_state.gpsd == NULL) {
+        log_error("failed to create new GPSD instance");
+        goto cleanup;
+    }
+
+    if (connect_gpsd()) {
+        log_error("failed to connect to GPSD!");
+        goto cleanup;
+    }
+
     run_state.mosq = mosquitto_new(run_state.config->client_id, true /* clean session */, NULL);
     if (!run_state.mosq) {
         log_error("failed to create new mosquitto instance");
@@ -359,20 +419,6 @@ int main(int argc, char *argv[]) {
     mosquitto_disconnect_callback_set(run_state.mosq, my_disconnect_cb);
     mosquitto_log_callback_set(run_state.mosq, my_log_callback);
 
-    if (gps_open(run_state.config->gpsd_host, run_state.config->gpsd_port, &data)) {
-        log_error("no gpsd running or network error: %d, %s\n", errno, gps_errstr(errno));
-        exit(EXIT_FAILURE);
-    }
-
-    if (run_state.config->gpsd_device) {
-        flags |= WATCH_DEVICE;
-    }
-
-    if (gps_stream(&data, flags, run_state.config->gpsd_device)) {
-        log_error("failed to set GPS stream options: %d, %s\n", errno, gps_errstr(errno));
-        exit(EXIT_FAILURE);
-    }
-
     status = mosquitto_connect(run_state.mosq, run_state.config->mqtt_host, run_state.config->mqtt_port, 60 /* keepalive */);
     if (status) {
         log_warning("failed to connect to MQTT broker: %s", MOSQ_ERROR(status));
@@ -384,14 +430,27 @@ int main(int argc, char *argv[]) {
         if (run_state.reconnect_mosq) {
             reconnect_mqtt();
         }
+        if (run_state.reconnect_gpsd) {
+            reconnect_gpsd();
+        }
 
         mosquitto_loop(run_state.mosq, timeout, 1 /* max_packets */);
 
-        if (gps_waiting(&data, timeout)) {
-            if (gps_read(&data, NULL, 0) < 0) {
-                log_warning("failed to read data from GPSD!");
+        if (gps_waiting(run_state.gpsd, timeout)) {
+            if (gps_read(run_state.gpsd, NULL, 0) < 0) {
+                if ((gps_error_cnt++ % 10) == 0) {
+                    log_warning("failed to read data from GPSD: %d, %s!", errno, gps_errstr(errno));
+                }
+                if (gps_error_cnt == 100) {
+                    log_warning("Too many errors from GPSD; trying to reconnect!");
+                    gps_close(run_state.gpsd);
+                    run_state.reconnect_gpsd = true;
+                    gps_error_cnt = 0;
+                }
                 continue;
             }
+
+            struct gps_data_t data = *run_state.gpsd;
 
             if (data.set & VERSION_SET) {
                 log_debug("Connected to GPSD with protocol v%d.%d", data.version.proto_major, data.version.proto_minor);
@@ -422,8 +481,8 @@ int main(int argc, char *argv[]) {
 
 cleanup:
     log_debug("Closing connection to GPSD...");
-    gps_stream(&data, WATCH_DISABLE, NULL);
-    gps_close(&data);
+    gps_stream(run_state.gpsd, WATCH_DISABLE, NULL);
+    gps_close(run_state.gpsd);
 
     log_debug("Closing connection to MQTT...");
     mosquitto_disconnect(run_state.mosq);
