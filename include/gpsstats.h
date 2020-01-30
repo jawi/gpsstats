@@ -9,7 +9,7 @@
 #define _GPSSTATS_H
 
 #define PROGNAME "gpsstats"
-#define VERSION "0.0.1"
+#define VERSION "0.1.0"
 #define CONF_FILE "/etc/" PROGNAME ".cfg"
 #define PID_FILE "/var/run/" PROGNAME ".pid"
 
