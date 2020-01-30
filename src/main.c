@@ -14,232 +14,27 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <gps.h>
-#include <mosquitto.h>
+#include <udaemon/udaemon.h>
 
 #include "config.h"
+#include "gpsd.h"
 #include "gpsstats.h"
-#include "logging.h"
-#include "timespec.h"
-#include "util.h"
-
-#define MAX_RECONNECT_DELAY_VALUE 32
-
-#define MOSQ_ERROR(s) \
-	((s) == MOSQ_ERR_ERRNO) ? strerror(errno) : mosquitto_strerror((s))
+#include "mqtt.h"
 
 typedef struct {
+    char *conf_file;
     config_t *config;
-    struct mosquitto *mosq;
-    struct gps_data_t *gpsd;
 
-    bool reconnect_mosq;
-    bool reconnect_gpsd;
+    mqtt_handle_t *mqtt;
+    gpsd_handle_t *gpsd;
 
-    time_t next_reconnect_attempt;
-    uint32_t next_delay_value;
-
-    timestamp_t time;
-    int sats_visible;
-    int sats_used;
-    long qErr;
-    double tdop;
-    double avg_snr;
-    struct timespec toff_diff;
-    struct timespec pps_diff;
-    uint8_t sats_seen[GNSSID_CNT];
-    bool loop;
+    eh_id_t gpsd_event_handler_id;
+    eh_id_t mosq_event_handler_id;
 } run_state_t;
 
-static const char* gnssid_name[GNSSID_CNT] = {
-    "gps",
-    "sbas",
-    "galileo",
-    "beidou",
-    "imes",
-    "qzss",
-    "glonass",
-    "irnss"
+static run_state_t run_state = {
+    .conf_file = CONF_FILE,
 };
-
-static run_state_t run_state = { 0 };
-
-static void quit_handler(int signum) {
-    run_state.loop = false;
-}
-
-static bool gps_stats_changed(struct gps_data_t *data) {
-    double snr_total = 0;
-    double snr_avg = 0;
-    uint8_t sats_seen[GNSSID_CNT] = { 0 };
-
-    for(int i = 0; i <= data->satellites_visible; i++) {
-        if (!data->skyview[i].used) {
-            continue;
-        }
-
-        if (data->skyview[i].ss > 1) {
-            snr_total += data->skyview[i].ss;
-        }
-
-        if (data->skyview[i].svid != 0) {
-            uint8_t gnssid = data->skyview[i].gnssid;
-            if (gnssid >= 0 && gnssid < GNSSID_CNT) {
-                sats_seen[gnssid]++;
-            }
-        }
-    }
-    if (data->satellites_used > 0) {
-        snr_avg = snr_total / data->satellites_used;
-    }
-
-    if ((run_state.sats_used == data->satellites_used) &&
-            (run_state.sats_visible == data->satellites_visible) &&
-            (run_state.tdop == data->dop.tdop) &&
-            (run_state.avg_snr == snr_avg) &&
-            memcmp(run_state.sats_seen, sats_seen, sizeof(sats_seen)) == 0) {
-        return false;
-    }
-
-    // Update our local stats...
-    run_state.time = data->fix.time;
-    run_state.qErr = data->fix.qErr;
-    run_state.sats_used = data->satellites_used;
-    run_state.sats_visible = data->satellites_visible;
-    run_state.tdop = data->dop.tdop;
-    run_state.avg_snr = snr_avg;
-    memcpy(run_state.sats_seen, sats_seen, sizeof(sats_seen));
-
-    return true;
-}
-
-#define INITIAL_BUFFER_SIZE 256
-
-#define BUFFER_ADD(...)                                                        \
-  do {                                                                         \
-    int status;                                                                \
-    status = snprintf(buffer + offset, buffer_size - offset, __VA_ARGS__);     \
-    if (status < 1) {                                                          \
-      free(buffer);                                                            \
-      return NULL;                                                             \
-    } else if (((size_t)status) >= (buffer_size - offset)) {                   \
-      free(buffer);                                                            \
-      return NULL;                                                             \
-    } else                                                                     \
-      offset += ((size_t)status);                                              \
-  } while (0)
-
-static char *create_mqtt_payload(void) {
-    size_t offset = 0;
-    size_t buffer_size = INITIAL_BUFFER_SIZE;
-    char *buffer = malloc(buffer_size * sizeof(char));
-
-    BUFFER_ADD("{\"time\":%f,\"sats_used\":%d,\"sats_visible\":%d,\"tdop\":%f,\"avg_snr\":%f",
-               run_state.time,
-               run_state.sats_used,
-               run_state.sats_visible,
-               run_state.tdop,
-               run_state.avg_snr);
-
-    if (run_state.qErr) {
-        BUFFER_ADD(",\"qErr\":%ld", run_state.qErr);
-    }
-
-    BUFFER_ADD(",\"toff\":%f", TSTONS(&run_state.toff_diff));
-    BUFFER_ADD(",\"pps\":%f", TSTONS(&run_state.pps_diff));
-
-    for (int i = 0; i < GNSSID_CNT; i++) {
-        uint8_t seen = run_state.sats_seen[i];
-        if (seen > 0) {
-            BUFFER_ADD(",\"sats.%s\":%d", gnssid_name[i], run_state.sats_seen[i]);
-        }
-    }
-
-    BUFFER_ADD("}");
-
-    return buffer;
-}
-
-static void send_mqtt_event(const char *event_data) {
-    log_debug("Publishing event %s", event_data);
-
-    int status = mosquitto_publish(run_state.mosq, NULL /* message id */,
-                                   "gpsstats",
-                                   (int) strlen(event_data), event_data,
-                                   run_state.config->qos,
-                                   run_state.config->retain);
-    if (status) {
-        log_warning("Failed to publish data to MQTT broker. Reason: %s", MOSQ_ERROR(status));
-    }
-}
-
-static bool mqtt_needs_to_reconnect(int status) {
-    return status == MOSQ_ERR_NO_CONN ||
-           status == MOSQ_ERR_CONN_REFUSED ||
-           status == MOSQ_ERR_CONN_LOST ||
-           status == MOSQ_ERR_TLS ||
-           status == MOSQ_ERR_AUTH ||
-           status == MOSQ_ERR_UNKNOWN;
-}
-
-static void my_connect_cb(struct mosquitto *mosq, void *user_data, int result) {
-    (void)mosq;
-    (void)user_data;
-
-    if (result) {
-        log_warning("unable to connect to MQTT broker. Reason: %s", MOSQ_ERROR(result));
-    } else {
-        log_info("successfully connected to MQTT broker");
-    }
-}
-
-static void my_disconnect_cb(struct mosquitto *mosq, void *user_data, int result) {
-    (void)mosq;
-    (void)user_data;
-
-    if (result) {
-        log_info("disconnected from MQTT broker. Reason: %s", MOSQ_ERROR(result));
-        if (mqtt_needs_to_reconnect(result)) {
-            run_state.reconnect_mosq = true;
-        }
-    } else {
-        log_info("disconnected from MQTT broker.");
-    }
-}
-
-static void my_log_callback(struct mosquitto *mosq, void *user_data, int level, const char *msg) {
-    (void)mosq;
-    (void)user_data;
-    (void)level;
-    log_debug(msg);
-}
-
-static int reconnect_mqtt(void) {
-    time_t now = time(NULL);
-    if (run_state.reconnect_mosq && run_state.next_reconnect_attempt >= now) {
-        return 1;
-    }
-
-    run_state.reconnect_mosq = true;
-    int status = mosquitto_reconnect(run_state.mosq);
-    if (status != MOSQ_ERR_SUCCESS) {
-        log_debug("failed to reconnect to MQTT broker: %s", MOSQ_ERROR(status));
-
-        run_state.next_reconnect_attempt = now + run_state.next_delay_value;
-
-        if (run_state.next_delay_value < MAX_RECONNECT_DELAY_VALUE) {
-            run_state.next_delay_value <<= 1;
-        }
-
-        return -1;
-    }
-
-    run_state.reconnect_mosq = false;
-    run_state.next_reconnect_attempt = -1L;
-    run_state.next_delay_value = 1;
-
-    return 0;
-}
 
 static void dump_config(config_t *config) {
     log_debug("Using configuration:");
@@ -274,79 +69,146 @@ static void dump_config(config_t *config) {
     }
 }
 
-static int connect_gpsd(void) {
-    unsigned int flags = WATCH_ENABLE | WATCH_NEWSTYLE | WATCH_JSON | WATCH_PPS | WATCH_TIMING;
-
-    if (gps_open(run_state.config->gpsd_host, run_state.config->gpsd_port, run_state.gpsd)) {
-        log_error("no gpsd running or network error: %d, %s", errno, gps_errstr(errno));
-        return -1;
+// Called when data of gpsd is received...
+static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd) {
+    if (pollfd->revents & POLLIN) {
+        char *event = gpsd_read_data(run_state.gpsd);
+        if (event) {
+            mqtt_send_event(run_state.mqtt, event);
+            free(event);
+        }
     }
 
-    if (run_state.config->gpsd_device) {
-        flags |= WATCH_DEVICE;
+    // TODO: Handle reconnects...
+}
+
+// Called when data of mosquitto is received/to be transmitted...
+static void gpsstats_mosquitto_callback(ud_state_t *ud_state, struct pollfd *pollfd) {
+    if (pollfd->revents & POLLOUT) {
+        // We can write safely...
+        mqtt_write_data(run_state.mqtt);
+    }
+    if (pollfd->revents & POLLIN) {
+        // We can read safely...
+        mqtt_read_data(run_state.mqtt);
     }
 
-    if (gps_stream(run_state.gpsd, flags, run_state.config->gpsd_device)) {
-        log_error("failed to set GPS stream options: %d, %s", errno, gps_errstr(errno));
-        return -1;
+    // TODO: handle reconnects!!!
+}
+
+// Initializes GPSStats
+static int gpsstats_init(ud_state_t *ud_state) {
+    run_state.config = read_config(run_state.conf_file);
+
+    // Sanity check; make sure we've got a valid configuration at hand...
+    if (run_state.config == NULL) {
+        return -EINVAL;
+    }
+
+    dump_config(run_state.config);
+
+    int fd;
+
+    run_state.gpsd = gpsd_init(run_state.config);
+    if (run_state.gpsd == NULL) {
+        log_warning("Unable to initialize GPSD!");
+    }
+
+    if (gpsd_connect(run_state.gpsd)) {
+        log_warning("Unable to connect to GPSD!");
+    }
+
+    fd = gpsd_fd(run_state.gpsd);
+    if (fd) {
+        if (ud_add_event_handler(ud_state, fd, POLLIN,
+                                 gpsstats_gps_callback,
+                                 &run_state.gpsd_event_handler_id)) {
+            log_warning("Unable to add GPSD event handler!");
+            return -EINVAL;
+        }
+    }
+
+    run_state.mqtt = mqtt_init(run_state.config);
+    if (run_state.mqtt == NULL) {
+        log_warning("Unable to connect to MQTT!");
+    }
+
+    if (mqtt_connect(run_state.mqtt)) {
+        log_warning("Unable to connect to MQTT!");
+    }
+
+    fd = mqtt_fd(run_state.mqtt);
+    if (fd) {
+        if (ud_add_event_handler(ud_state, fd, POLLIN | POLLOUT,
+                                 gpsstats_mosquitto_callback,
+                                 &run_state.mosq_event_handler_id)) {
+            log_warning("Unable to add MQTT event handler!");
+            return -EINVAL;
+        }
     }
 
     return 0;
 }
 
-static int reconnect_gpsd(void) {
-    time_t now = time(NULL);
-    if (run_state.reconnect_gpsd && run_state.next_reconnect_attempt >= now) {
-        return 1;
+static void gpsstats_signal_handler(ud_state_t *ud_state, ud_signal_t signal) {
+    if (signal == SIG_HUP) {
+        // reload configuration...
+        log_info("Reloading configuration file...");
+    } else if (signal == SIG_USR1) {
+        // dump statistics...
+        log_info("Dumping statistics...");
     }
+}
 
-    run_state.reconnect_gpsd = true;
-    int status = connect_gpsd();
-    if (status) {
-        log_debug("failed to reconnect to GPSD");
+static int gpsstats_mqtt_misc_loop(ud_state_t *ud_state, int interval, void *context) {
+    log_debug("Running misc loop...");
+    mqtt_misc_loop(run_state.mqtt);
+    return interval;
+}
 
-        run_state.next_reconnect_attempt = now + run_state.next_delay_value;
+// Cleans up all resources...
+static int gpsstats_cleanup(ud_state_t *ud_state) {
+    log_debug("Closing connection to GPSD...");
+    gpsd_disconnect(run_state.gpsd);
+    gpsd_destroy(run_state.gpsd);
 
-        if (run_state.next_delay_value < MAX_RECONNECT_DELAY_VALUE) {
-            run_state.next_delay_value <<= 1;
-        }
+    log_debug("Closing connection to MQTT...");
+    mqtt_disconnect(run_state.mqtt);
+    mqtt_destroy(run_state.mqtt);
 
-        return -1;
+    free_config(run_state.config);
+
+    if (run_state.conf_file != CONF_FILE) {
+        free(run_state.conf_file);
     }
-
-    run_state.reconnect_gpsd = false;
-    run_state.next_reconnect_attempt = -1L;
-    run_state.next_delay_value = 1;
 
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    int timeout = 250; // milliseconds
-    uint8_t gps_error_cnt = 0;
-    int status;
+    ud_config_t daemon_config = {
+        .progname = PROGNAME,
+        .pid_file = PID_FILE,
+        .initialize = gpsstats_init,
+        .signal_handler = gpsstats_signal_handler,
+        .cleanup = gpsstats_cleanup,
+    };
 
     // parse arguments...
-    char *conf_file = NULL;
-    char *pid_file = NULL;
-
-    bool foreground = false;
-    bool debug = false;
     int opt;
-
     while ((opt = getopt(argc, argv, "c:dfhp:v")) != -1) {
         switch (opt) {
         case 'c':
-            conf_file = strdup(optarg);
+            run_state.conf_file = strdup(optarg);
             break;
         case 'd':
-            debug = true;
+            daemon_config.debug = true;
             break;
         case 'f':
-            foreground = true;
+            daemon_config.foreground = true;
             break;
         case 'p':
-            pid_file = strdup(optarg);
+            daemon_config.pid_file = strdup(optarg);
             break;
         case 'v':
         case 'h':
@@ -360,143 +222,49 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!conf_file) {
-        conf_file = strdup(CONF_FILE);
-    }
-    if (!pid_file) {
-        pid_file = strdup(PID_FILE);
-    }
+    ud_state_t *daemon = ud_init(&daemon_config);
+    // Perform periodic tasks...
+    ud_schedule_task(daemon, 5, gpsstats_mqtt_misc_loop, NULL);
 
-    // close any file descriptors we inherited...
-    const long max_fd = sysconf(_SC_OPEN_MAX);
-    for (int fd = 3; fd < max_fd; fd++) {
-        close(fd);
-    }
-    // do this *after* we've closed the file descriptors!
-    init_logging(debug, foreground);
+    int retval = ud_main_loop(daemon);
 
-    /* catch all interesting signals */
-    (void)signal(SIGTERM, quit_handler);
-    (void)signal(SIGQUIT, quit_handler);
-    (void)signal(SIGINT, quit_handler);
+    ud_destroy(daemon);
 
-    run_state.config = read_config(conf_file);
-
-    // Sanity check; make sure we've got a valid configuration at hand...
-    if (run_state.config == NULL) {
-        goto cleanup;
+    if (daemon_config.pid_file && daemon_config.pid_file != PID_FILE) {
+        free(daemon_config.pid_file);
     }
 
-    dump_config(run_state.config);
+    return retval;
+    /*
 
-    if (!foreground) {
-        int retval = daemonize(pid_file, run_state.config->priv_user, run_state.config->priv_group);
-        if (retval) {
-            exit(retval);
-        }
-    }
 
-    run_state.gpsd = malloc(sizeof(struct gps_data_t));
-    if (run_state.gpsd == NULL) {
-        log_error("failed to create new GPSD instance");
-        goto cleanup;
-    }
+        run_state.loop = true;
 
-    if (connect_gpsd()) {
-        log_error("failed to connect to GPSD!");
-        goto cleanup;
-    }
+        while (run_state.loop) {
+            if (run_state.reconnect_mosq) {
+                reconnect_mqtt();
+            }
+            if (run_state.reconnect_gpsd) {
+                reconnect_gpsd();
+            }
 
-    run_state.mosq = mosquitto_new(run_state.config->client_id, true /* clean session */, NULL);
-    if (!run_state.mosq) {
-        log_error("failed to create new mosquitto instance");
-        goto cleanup;
-    }
+            // 1 == max_packets
+            mosquitto_loop(run_state.mosq, timeout, 1);
 
-    // TODO: set TLS & auth parameters to mosquitto...
-
-    mosquitto_connect_callback_set(run_state.mosq, my_connect_cb);
-    mosquitto_disconnect_callback_set(run_state.mosq, my_disconnect_cb);
-    mosquitto_log_callback_set(run_state.mosq, my_log_callback);
-
-    status = mosquitto_connect(run_state.mosq, run_state.config->mqtt_host, run_state.config->mqtt_port, 60 /* keepalive */);
-    if (status) {
-        log_warning("failed to connect to MQTT broker: %s", MOSQ_ERROR(status));
-    }
-
-    run_state.loop = true;
-
-    while (run_state.loop) {
-        if (run_state.reconnect_mosq) {
-            reconnect_mqtt();
-        }
-        if (run_state.reconnect_gpsd) {
-            reconnect_gpsd();
-        }
-
-        mosquitto_loop(run_state.mosq, timeout, 1 /* max_packets */);
-
-        if (gps_waiting(run_state.gpsd, timeout)) {
-            if (gps_read(run_state.gpsd, NULL, 0) < 0) {
-                if ((gps_error_cnt++ % 10) == 0) {
-                    log_warning("failed to read data from GPSD: %d, %s!", errno, gps_errstr(errno));
+            if (gps_waiting(run_state.gpsd, timeout)) {
+                if (gps_read(run_state.gpsd, NULL, 0) < 0) {
+                    if ((gps_error_cnt++ % 10) == 0) {
+                    }
+                    if (gps_error_cnt == 100) {
+                        log_warning("Too many errors from GPSD; trying to reconnect!");
+                        gps_close(run_state.gpsd);
+                        run_state.reconnect_gpsd = true;
+                        gps_error_cnt = 0;
+                    }
+                    continue;
                 }
-                if (gps_error_cnt == 100) {
-                    log_warning("Too many errors from GPSD; trying to reconnect!");
-                    gps_close(run_state.gpsd);
-                    run_state.reconnect_gpsd = true;
-                    gps_error_cnt = 0;
-                }
-                continue;
-            }
 
-            struct gps_data_t data = *run_state.gpsd;
-
-            if (data.set & VERSION_SET) {
-                log_debug("Connected to GPSD with protocol v%d.%d", data.version.proto_major, data.version.proto_minor);
-            }
-
-            if (data.set & ERROR_SET) {
-                log_warning("GPSD returned: %s", data.error);
-                continue;
-            }
-
-            if (data.set & TOFF_SET) {
-                TS_SUB(&run_state.toff_diff, &data.toff.clock, &data.toff.real);
-            }
-
-            if (data.set & PPS_SET) {
-                TS_SUB(&run_state.pps_diff, &data.pps.clock, &data.pps.real);
-            }
-
-            if ((data.fix.mode > MODE_NO_FIX) && (data.satellites_used > 0) && gps_stats_changed(&data)) {
-                char *event_data = create_mqtt_payload();
-                if (event_data) {
-                    send_mqtt_event(event_data);
-                    free(event_data);
-                }
             }
         }
-    }
-
-cleanup:
-    log_debug("Closing connection to GPSD...");
-    gps_stream(run_state.gpsd, WATCH_DISABLE, NULL);
-    gps_close(run_state.gpsd);
-
-    log_debug("Closing connection to MQTT...");
-    mosquitto_disconnect(run_state.mosq);
-    mosquitto_destroy(run_state.mosq);
-    mosquitto_lib_cleanup();
-
-    destroy_logging();
-    free_config(run_state.config);
-
-    // best effort; will only succeed if the permissions are set correctly...
-    unlink(pid_file);
-
-    free(conf_file);
-    free(pid_file);
-
-    return 0;
+    */
 }

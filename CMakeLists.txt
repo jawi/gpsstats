@@ -16,9 +16,9 @@ find_package(Mosquitto 1.5 REQUIRED)
 
 add_executable(gpsstats
     src/config.c
-    src/logging.c
+    src/gpsd.c
+    src/mqtt.c
     src/main.c
-    src/utils.c
 )
 
 target_include_directories(gpsstats

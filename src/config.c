@@ -16,9 +16,9 @@
 #include <sys/types.h>
 
 #include <yaml.h>
+#include <udaemon/ud_logging.h>
 
 #include "config.h"
-#include "logging.h"
 
 typedef enum config_block {
     ROOT = 0,

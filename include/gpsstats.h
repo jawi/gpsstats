@@ -1,7 +1,7 @@
 /*
  * gpsstats - statistics for GPS daemon
  *
- * Copyright: (C) 2019 jawi
+ * Copyright: (C) 2020 jawi
  *   License: Apache License 2.0
  */
 
