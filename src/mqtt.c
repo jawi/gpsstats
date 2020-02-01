@@ -23,24 +23,15 @@
 #define MOSQ_ERROR(s) \
 	((s) == MOSQ_ERR_ERRNO) ? strerror(errno) : mosquitto_strerror((s))
 
-typedef enum conn_state {
-    INITIALIZED,
-    NOT_CONNECTED,
-    CONNECTED,
-    RECONNECTING,
-    DISCONNECTED,
-} conn_state_t;
-
 struct mqtt_handle {
     struct mosquitto *mosq;
-    conn_state_t conn_state;
     char *host;
     int port;
     bool retain;
     int qos;
 
-    time_t next_reconnect_attempt;
-    int next_delay_value;
+    uint32_t mqtt_events_send;
+    time_t mqtt_last_event;
 };
 
 static void my_connect_cb(struct mosquitto *mosq, void *user_data, int result) {
@@ -102,9 +93,6 @@ mqtt_handle_t *mqtt_init(const config_t *cfg) {
     handle->port = cfg->mqtt_port;
     handle->retain = cfg->retain;
     handle->qos = cfg->qos;
-    handle->conn_state = INITIALIZED;
-    handle->next_reconnect_attempt = -1L;
-    handle->next_delay_value = 1;
 
     int status;
 
@@ -149,12 +137,7 @@ mqtt_handle_t *mqtt_init(const config_t *cfg) {
     return handle;
 
 err_cleanup:
-    if (handle->mosq) {
-        mosquitto_destroy(handle->mosq);
-    }
-    free(handle);
-
-    mosquitto_lib_cleanup();
+    mqtt_destroy(handle);
 
     return NULL;
 }
@@ -171,58 +154,90 @@ void mqtt_destroy(mqtt_handle_t *handle) {
 }
 
 int mqtt_connect(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
     int status = mosquitto_connect(handle->mosq, handle->host, handle->port, 60 /* keepalive */);
     if (status != MOSQ_ERR_SUCCESS) {
         log_warning("failed to connect to MQTT broker: %s", MOSQ_ERROR(status));
-        return -1;
+        return -ENOTCONN;
     }
+
     return 0;
 }
 
 int mqtt_disconnect(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+    if (handle->mosq == NULL) {
+        // Not connected...
+        return 0;
+    }
+
     int status = mosquitto_disconnect(handle->mosq);
     if (status != MOSQ_ERR_SUCCESS && status != MOSQ_ERR_NO_CONN) {
         log_warning("failed to disconnect from MQTT broker: %s", MOSQ_ERROR(status));
-        return -1;
+        return -ENOTCONN;
     }
+
     return 0;
 }
 
 int mqtt_read_data(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
     int status = mosquitto_loop_read(handle->mosq, 1 /* max_packets */);
     if (status != MOSQ_ERR_SUCCESS) {
         log_warning("Failed to read MQTT messages. Reason: %s", MOSQ_ERROR(status));
-        return -1;
+        return mqtt_needs_to_reconnect(status) ? -ENOTCONN : -ENOTRECOVERABLE;
     }
     return 0;
 }
 
-int mqtt_write_data(mqtt_handle_t *handle) {
-    int status;
-
-    if (!mosquitto_want_write(handle->mosq)) {
-        // Nothing to do...
-        return 0;
+bool mqtt_want_write(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
     }
+    return mosquitto_want_write(handle->mosq);
+}
+
+int mqtt_write_data(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
+    int status;
 
     status = mosquitto_loop_write(handle->mosq, 1 /* max_packets */);
     if (status != MOSQ_ERR_SUCCESS) {
         log_warning("Failed to write MQTT messages. Reason: %s", MOSQ_ERROR(status));
-        return -1;
+        return mqtt_needs_to_reconnect(status) ? -ENOTCONN : -ENOTRECOVERABLE;
     }
     return 0;
 }
 
 int mqtt_misc_loop(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
     int status = mosquitto_loop_misc(handle->mosq);
     if (status != MOSQ_ERR_SUCCESS) {
         log_warning("Failed to run misc loop of MQTT: %s", MOSQ_ERROR(status));
-        return -1;
+        return mqtt_needs_to_reconnect(status) ? -ENOTCONN : -ENOTRECOVERABLE;
     }
     return 0;
 }
 
 int mqtt_fd(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
     int fd = mosquitto_socket(handle->mosq);
     if (fd < 0) {
         log_error("Failed to obtain MQTT file descriptor!");
@@ -230,7 +245,11 @@ int mqtt_fd(mqtt_handle_t *handle) {
     return fd;
 }
 
-void mqtt_send_event(mqtt_handle_t *handle, const char *event_data) {
+int mqtt_send_event(mqtt_handle_t *handle, const char *event_data) {
+    if (handle == NULL) {
+        return -EINVAL;
+    }
+
     log_debug("Publishing event %s", event_data);
 
     int status = mosquitto_publish(handle->mosq, NULL /* message id */,
@@ -240,7 +259,27 @@ void mqtt_send_event(mqtt_handle_t *handle, const char *event_data) {
                                    handle->retain);
     if (status) {
         log_warning("Failed to publish data to MQTT broker. Reason: %s", MOSQ_ERROR(status));
+        return mqtt_needs_to_reconnect(status) ? -ENOTCONN : -ENOTRECOVERABLE;
     }
+
+    // Update stats...
+    handle->mqtt_events_send++;
+    handle->mqtt_last_event = time(NULL);
+
+    return 0;
+}
+
+mqtt_stats_t mqtt_dump_stats(mqtt_handle_t *handle) {
+    if (handle == NULL) {
+        return (mqtt_stats_t) {
+            0
+        };
+    }
+
+    return (mqtt_stats_t) {
+        .events_send = handle->mqtt_events_send,
+        .last_event = handle->mqtt_last_event,
+    };
 }
 
 // EOF

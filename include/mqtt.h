@@ -16,6 +16,14 @@
 typedef struct mqtt_handle mqtt_handle_t;
 
 /**
+ * Represents statistics about our connection to MQTT.
+ */
+typedef struct mqtt_stats {
+    uint32_t events_send;
+    time_t last_event;
+} mqtt_stats_t;
+
+/**
  * Allocates and initializes a new MQTT handle, but does not connect to MQTT yet, @see #connect_mqtt.
  *
  * @param config the configuration options.
@@ -54,6 +62,8 @@ int mqtt_disconnect(mqtt_handle_t *handle);
  */
 int mqtt_read_data(mqtt_handle_t *handle);
 
+bool mqtt_want_write(mqtt_handle_t *handle);
+
 /**
  * Performs the writing of MQTT data.
  *
@@ -85,6 +95,14 @@ int mqtt_fd(mqtt_handle_t *handle);
  * @param event_data the event data to send, cannot be NULL.
  * @return 0 upon success, or a non-zero value in case of errors.
  */
-void mqtt_send_event(mqtt_handle_t *handle, const char *event_data);
+int mqtt_send_event(mqtt_handle_t *handle, const char *event_data);
+
+/**
+ * Dumps statistics about the MQTT connection at info logging level.
+ * 
+ * @param handle the MQTT handle, cannot be NULL.
+ * @return the MQTT statistics.
+ */
+mqtt_stats_t mqtt_dump_stats(mqtt_handle_t *handle);
 
 #endif
