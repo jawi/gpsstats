@@ -69,7 +69,7 @@ static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
 
         if (data->skyview[i].svid != 0) {
             uint8_t gnssid = data->skyview[i].gnssid;
-            if (gnssid >= 0 && gnssid < GNSSID_CNT) {
+            if (gnssid < GNSSID_CNT) {
                 sats_seen[gnssid]++;
             }
         }

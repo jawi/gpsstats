@@ -39,7 +39,10 @@ typedef struct {
 
 } run_state_t;
 
-static run_state_t run_state = { 0 };
+static run_state_t _run_state = {
+    .gpsd_event_handler_id = UD_INVALID_ID,
+    .mqtt_event_handler_id = UD_INVALID_ID,
+};
 
 static void dump_config(config_t *config) {
     log_debug("Using configuration:");
@@ -74,69 +77,74 @@ static void dump_config(config_t *config) {
     }
 }
 
-static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd);
-static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd);
+static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context);
+static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context);
 
 // task that disconnects from GPSD and reconnects to it...
-static int gpsstats_reconnect_gpsd(ud_state_t *ud_state, int interval, void *context) {
-    if (run_state.gpsd) {
+static int gpsstats_reconnect_gpsd(ud_state_t *ud_state, uint16_t interval, void *context) {
+    run_state_t *run_state = context;
+
+    if (run_state->gpsd) {
         log_debug("Closing connection to GPSD...");
 
-        gpsd_disconnect(run_state.gpsd);
-        gpsd_destroy(run_state.gpsd);
-        run_state.gpsd = NULL;
+        gpsd_disconnect(run_state->gpsd);
+        gpsd_destroy(run_state->gpsd);
+        run_state->gpsd = NULL;
 
         // Update stats...
-        run_state.gpsd_disconnects++;
+        run_state->gpsd_disconnects++;
     }
 
-    if (run_state.gpsd_event_handler_id) {
-        if (ud_remove_event_handler(ud_state, run_state.gpsd_event_handler_id)) {
+    if (ud_valid_event_handler_id(run_state->gpsd_event_handler_id)) {
+        if (ud_remove_event_handler(ud_state, run_state->gpsd_event_handler_id)) {
             log_warning("Unable to remove GPSD event handler!");
         }
-        run_state.gpsd_event_handler_id = 0;
+        run_state->gpsd_event_handler_id = UD_INVALID_ID;
     }
 
-    run_state.gpsd = gpsd_init(run_state.config);
-    if (run_state.gpsd == NULL) {
+    run_state->gpsd = gpsd_init(run_state->config);
+    if (run_state->gpsd == NULL) {
         log_warning("Unable to reinitialize GPSD! Out of memory?");
         return -ENOMEM;
     }
 
-    if (gpsd_connect(run_state.gpsd)) {
+    if (gpsd_connect(run_state->gpsd)) {
         log_warning("Unable to connect to GPSD! Scheduling retry...");
         return interval * 2;
     }
 
-    int fd = gpsd_fd(run_state.gpsd);
+    int fd = gpsd_fd(run_state->gpsd);
     if (fd) {
         if (ud_add_event_handler(ud_state, fd, POLLIN,
                                  gpsstats_gps_callback,
-                                 &run_state.gpsd_event_handler_id)) {
+                                 run_state,
+                                 &run_state->gpsd_event_handler_id)) {
             log_warning("Unable to add GPSD event handler!");
             return -EINVAL;
         }
     }
 
     // Update stats...
-    run_state.gpsd_connects++;
+    run_state->gpsd_connects++;
 
     return 0;
 }
 
 // Called when data of gpsd is received...
-static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd) {
+static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
+    run_state_t *run_state = context;
+
     int status;
     bool need_reconnect = false;
 
     if (pollfd->revents & POLLIN) {
         char *event = { 0 };
 
-        status = gpsd_read_data(run_state.gpsd, &event);
+        status = gpsd_read_data(run_state->gpsd, &event);
         if (status < 0) {
             need_reconnect = (status == -ENOTCONN);
         } else if (status > 0) {
-            mqtt_send_event(run_state.mqtt, event);
+            mqtt_send_event(run_state->mqtt, event);
             free(event);
         }
     }
@@ -145,62 +153,67 @@ static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd) {
         // ensure we no longer get any results from poll() while we're reconnecting...
         pollfd->events = 0;
 
-        if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, NULL)) {
+        if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, run_state)) {
             log_warning("Failed to register (re)connect task for GPSD?!");
         }
     }
 }
 
 // task that disconnects from MQTT and reconnects to it...
-static int gpsstats_reconnect_mqtt(ud_state_t *ud_state, int interval, void *context) {
-    if (run_state.mqtt) {
+static int gpsstats_reconnect_mqtt(ud_state_t *ud_state, uint16_t interval, void *context) {
+    run_state_t *run_state = context;
+
+    if (run_state->mqtt) {
         log_debug("Closing connection to MQTT...");
 
-        mqtt_disconnect(run_state.mqtt);
-        mqtt_destroy(run_state.mqtt);
-        run_state.mqtt = NULL;
+        mqtt_disconnect(run_state->mqtt);
+        mqtt_destroy(run_state->mqtt);
+        run_state->mqtt = NULL;
 
         // Update stats...
-        run_state.mqtt_disconnects++;
+        run_state->mqtt_disconnects++;
     }
 
-    if (run_state.mqtt_event_handler_id) {
-        if (ud_remove_event_handler(ud_state, run_state.mqtt_event_handler_id)) {
+    if (ud_valid_event_handler_id(run_state->mqtt_event_handler_id)) {
+        if (ud_remove_event_handler(ud_state, run_state->mqtt_event_handler_id)) {
             log_warning("Unable to remove MQTT event handler!");
         }
-        run_state.mqtt_event_handler_id = 0;
+        run_state->mqtt_event_handler_id = UD_INVALID_ID;
     }
 
-    run_state.mqtt = mqtt_init(run_state.config);
-    if (run_state.mqtt == NULL) {
+    run_state->mqtt = mqtt_init(run_state->config);
+    if (run_state->mqtt == NULL) {
         log_warning("Unable to reinitialize MQTT! Out of memory?");
         return -ENOMEM;
     }
 
-    if (mqtt_connect(run_state.mqtt)) {
+    if (mqtt_connect(run_state->mqtt)) {
         log_warning("Unable to connect to MQTT! Scheduling retry...");
         return interval * 2;
     }
 
-    int fd = mqtt_fd(run_state.mqtt);
+    int fd = mqtt_fd(run_state->mqtt);
     if (fd) {
         if (ud_add_event_handler(ud_state, fd, POLLIN,
                                  gpsstats_mqtt_callback,
-                                 &run_state.mqtt_event_handler_id)) {
+                                 run_state,
+                                 &run_state->mqtt_event_handler_id)) {
             log_warning("Unable to add MQTT event handler!");
             return -EINVAL;
         }
     }
 
     // Update stats...
-    run_state.mqtt_connects++;
+    run_state->mqtt_connects++;
 
     return 0;
 }
 
 // Called when data of mosquitto is received/to be transmitted...
-static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd) {
-    if (mqtt_want_write(run_state.mqtt)) {
+static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
+    run_state_t *run_state = context;
+
+    if (mqtt_want_write(run_state->mqtt)) {
         log_debug("Requesting to write MQTT data...");
 
         pollfd->events |= POLLOUT;
@@ -215,12 +228,12 @@ static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd) 
 
     if (pollfd->revents & POLLOUT) {
         // We can write safely...
-        status = mqtt_write_data(run_state.mqtt);
+        status = mqtt_write_data(run_state->mqtt);
         need_reconnect |= (status == -ENOTCONN);
     }
     if (pollfd->revents & POLLIN) {
         // We can read safely...
-        status = mqtt_read_data(run_state.mqtt);
+        status = mqtt_read_data(run_state->mqtt);
         need_reconnect |= (status == -ENOTCONN);
     }
 
@@ -228,35 +241,35 @@ static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd) 
         // ensure we no longer get any results from poll() while we're reconnecting...
         pollfd->events = 0;
 
-        if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, run_state.config)) {
+        if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, run_state->config)) {
             log_warning("Failed to register (re)connect task for MQTT?!");
         }
     }
 }
 
-static int gpsstats_load_config(ud_state_t *ud_state) {
-    config_t *new_config = read_config(run_state.conf_file);
+static int gpsstats_load_config(ud_state_t *ud_state, run_state_t *run_state) {
+    config_t *new_config = read_config(run_state->conf_file);
     if (new_config == NULL) {
         log_warning("Unable to load configuration file?!");
         return -EINVAL;
     }
 
-    config_t *old_config = run_state.config;
+    config_t *old_config = run_state->config;
     // Update current configuration...
-    run_state.config = new_config;
+    run_state->config = new_config;
 
     if (old_config) {
         free_config(old_config);
     }
 
-    dump_config(run_state.config);
+    dump_config(run_state->config);
 
     // Connect to both services...
-    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, NULL)) {
+    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, run_state)) {
         log_warning("Failed to register connect task for MQTT?!");
     }
 
-    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, NULL)) {
+    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, run_state)) {
         log_warning("Failed to register connect task for GPSD?!");
     }
 
@@ -265,7 +278,7 @@ static int gpsstats_load_config(ud_state_t *ud_state) {
 
 // Initializes GPSStats
 static int gpsstats_init(ud_state_t *ud_state) {
-    if (gpsstats_load_config(ud_state)) {
+    if (gpsstats_load_config(ud_state, &_run_state)) {
         log_warning("Initialization failed!");
         return -EINVAL;
     }
@@ -273,55 +286,62 @@ static int gpsstats_init(ud_state_t *ud_state) {
     return 0;
 }
 
-static void gpsstats_reload_config(ud_state_t *ud_state) {
+static void gpsstats_reload_config(ud_state_t *ud_state, run_state_t *run_state) {
     log_info("Reloading configuration file...");
 
-    if (gpsstats_load_config(ud_state)) {
+    if (gpsstats_load_config(ud_state, run_state)) {
         log_warning("Reload of configuration failed!");
     }
 }
 
-static void gpsstats_dump_stats(ud_state_t *ud_state) {
-    gpsd_stats_t gpsd_stats = gpsd_dump_stats(run_state.gpsd);
-    mqtt_stats_t mqtt_stats = mqtt_dump_stats(run_state.mqtt);
+static void gpsstats_dump_stats(ud_state_t *ud_state, run_state_t *run_state) {
+    (void)ud_state;
+
+    gpsd_stats_t gpsd_stats = gpsd_dump_stats(run_state->gpsd);
+    mqtt_stats_t mqtt_stats = mqtt_dump_stats(run_state->mqtt);
 
     log_info(PROGNAME " statistics:");
 
     log_info("GPSD connects: %d, disconnects: %d, events rx: %d, tx: %d, last seen: %d",
-             run_state.gpsd_connects, run_state.gpsd_disconnects,
+             run_state->gpsd_connects, run_state->gpsd_disconnects,
              gpsd_stats.events_recv, gpsd_stats.events_send,
              gpsd_stats.last_event);
 
     log_info("MQTT connects: %d, disconnects: %d, events tx: %d, last: %d",
-             run_state.mqtt_connects, run_state.mqtt_disconnects,
+             run_state->mqtt_connects, run_state->mqtt_disconnects,
              mqtt_stats.events_send,
              mqtt_stats.last_event);
 }
 
 static void gpsstats_signal_handler(ud_state_t *ud_state, ud_signal_t signal) {
     if (signal == SIG_HUP) {
-        gpsstats_reload_config(ud_state);
+        gpsstats_reload_config(ud_state, &_run_state);
     } else if (signal == SIG_USR1) {
-        gpsstats_dump_stats(ud_state);
+        gpsstats_dump_stats(ud_state, &_run_state);
     }
 }
 
-static int gpsstats_mqtt_misc_loop(ud_state_t *ud_state, int interval, void *context) {
-    mqtt_misc_loop(run_state.mqtt);
+static int gpsstats_mqtt_misc_loop(ud_state_t *ud_state, uint16_t interval, void *context) {
+    (void)ud_state;
+    run_state_t *run_state = context;
+
+    mqtt_misc_loop(run_state->mqtt);
     return interval;
 }
 
 // Cleans up all resources...
 static int gpsstats_cleanup(ud_state_t *ud_state) {
+    (void)ud_state;
+
     log_debug("Closing connection to GPSD...");
-    gpsd_disconnect(run_state.gpsd);
-    gpsd_destroy(run_state.gpsd);
+    gpsd_disconnect(_run_state.gpsd);
+    gpsd_destroy(_run_state.gpsd);
 
     log_debug("Closing connection to MQTT...");
-    mqtt_disconnect(run_state.mqtt);
-    mqtt_destroy(run_state.mqtt);
+    mqtt_disconnect(_run_state.mqtt);
+    mqtt_destroy(_run_state.mqtt);
 
-    free_config(run_state.config);
+    free_config(_run_state.config);
 
     return 0;
 }
@@ -339,7 +359,7 @@ int main(int argc, char *argv[]) {
     while ((opt = getopt(argc, argv, "c:dfhp:v")) != -1) {
         switch (opt) {
         case 'c':
-            run_state.conf_file = strdup(optarg);
+            _run_state.conf_file = strdup(optarg);
             break;
         case 'd':
             daemon_config.debug = true;
@@ -363,8 +383,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Use defaults if not set explicitly...
-    if (run_state.conf_file == NULL) {
-        run_state.conf_file = strdup(CONF_FILE);
+    if (_run_state.conf_file == NULL) {
+        _run_state.conf_file = strdup(CONF_FILE);
     }
     if (daemon_config.pid_file == NULL) {
         daemon_config.pid_file = strdup(PID_FILE);
@@ -372,13 +392,13 @@ int main(int argc, char *argv[]) {
 
     ud_state_t *daemon = ud_init(&daemon_config);
     // Perform periodic tasks...
-    ud_schedule_task(daemon, 5, gpsstats_mqtt_misc_loop, NULL);
+    ud_schedule_task(daemon, 5, gpsstats_mqtt_misc_loop, &_run_state);
 
     int retval = ud_main_loop(daemon);
 
     ud_destroy(daemon);
 
-    free(run_state.conf_file);
+    free(_run_state.conf_file);
     free(daemon_config.pid_file);
 
     return retval;
