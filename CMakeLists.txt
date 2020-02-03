@@ -14,6 +14,11 @@ find_package(LibYAML 0.2 REQUIRED)
 find_package(LibGPS 3.19 REQUIRED)
 find_package(Mosquitto 1.5 REQUIRED)
 
+# Generate the gpsstats.h file with the current information
+configure_file(
+    cmake/gpsstats.h.in ${CMAKE_CURRENT_SOURCE_DIR}/include/gpsstats.h @ONLY
+)
+
 add_executable(gpsstats
     src/config.c
     src/gpsd.c
@@ -28,7 +33,7 @@ target_include_directories(gpsstats
         src
 )
 
-target_compile_options(gpsstats 
+target_compile_options(gpsstats
     PRIVATE -Wall -Wstrict-prototypes -Wshadow -Wconversion
 )
 
