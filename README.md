@@ -1,7 +1,8 @@
 # gpsstats
 
 gpsstats is a small utility that connects to a (remote) GPSD instance and 
-extracts a couple of its statistics and writes it as JSON to a log file.
+extracts a couple of its statistics and writes it to a MQTT topic as a JSON
+payload.
 
 ## Usage
 
@@ -15,6 +16,18 @@ where
     -p  provides the path to gpsstats pidfile (default: /run/gpsstats.pid);
     -v  prints out the version number of gpsstats and exits;
     -h  prints out a short help text and exits.
+
+### Signals
+
+While running, gpsstats listens, aside the "normal" signals like `SIGTERM`
+and `SIGKILL`, also to following signals:
+
+- `SIGHUP`: when received will cause the main configuration file to be 
+  reloaded. Connections to both gpsd and mosquitto will be closed and
+  reopened!
+- `SIGUSR1`: when received will output some runtime statistics about
+  gpsstats. This feature is mainly intended to see whether gpsstats is
+  still receiving and transmitting data.
 
 ## Configuration
 
@@ -111,19 +124,19 @@ mqtt:
 ## Output
 
 The event data is published on the MQTT topic `gpsstats` as a JSON object,
-for example:
+for example (output is formatted for readability):
 
 ```json
 {
-    "time":1573505651.000000,
-    "sats_used":18,
-    "sats_visible":26,
-    "tdop":0.500000,
-    "avg_snr":27.500000,
-    "toff":0.059023,
-    "pps":0.000045,
-    "sats.gps":10,
-    "sats.glonass":8
+   "time":1580727836,
+   "sats_used":12,
+   "sats_visible":23,
+   "tdop":0.830000,
+   "avg_snr":28.833333,
+   "toff":0.205150,
+   "pps":-0.000001,
+   "sats.gps":8,
+   "sats.glonass":4
 }
 ```
 
@@ -135,25 +148,39 @@ The fields in the JSON object have the following semantics:
 
 | Field        | Description                                                                |
 |--------------|----------------------------------------------------------------------------|
-| sats_visible | the amount of satellites that are currently visible by the GPS device      |
-| sats_used    | the amount of satellites that are used by the GPS device                   |
-
+| time         | the time at which the event data from GPSD was received                    |
+| sats_visible | the number of satellites that are currently visible by the GPS device      |
+| sats_used    | the number of satellites that are used by the GPS device                   |
+| sats.*name*  | the number of specific GPS/GLONASS/SBAS/... satellites used; NOTE:         |
+|              | satellites that are not used are omitted!                                  |
+| avg_snr      | the average SNR from all used satellites                                   |
+| tdop         | the TDOP value as calculatd by GPSD                                        |
+| toff         | the TOFF value as calculated by GPSD                                       |
 
 ## Development
 
 ### Compilation
 
-Netmon requires the following build dependencies:
+gpsstats requires the following build dependencies:
 
-- libgps (3.19 or later);
-- libmosquitto (1.5.5 or later);
-- libyaml (0.2.1 or later).
+- [libudaemon](https://github.com/jawi/libudaemon) (0.6 or later);
+- [libgps](https://gitlab.com/gpsd/gpsd) (3.19 or later);
+- [libmosquitto](https://mosquitto.org/) (1.5.5 or later);
+- [libyaml](https://github.com/yaml/libyaml) (0.2.1 or later).
 
-Gpsstats is developed to run under Linux, but can run on other operating 
+Gpsstats is developed to run under Linux, but can/may run on other operating 
 systems as well, YMMV.
 
-Compilation is done by running `make all`. All build artifacts are placed in 
-the `build` directory.
+Gpsstats is now CMake based. To compile gpsstats, do the following:
+
+```sh
+$ cd build
+$ cmake ..
+$ make
+```
+
+All build artifacts, including the binaries, are placed in the `build`
+directory.
 
 ### Finding memory leaks
 
@@ -189,4 +216,4 @@ gpsstats is written by Jan Willem Janssen `j dot w dot janssen at lxtreme dot nl
 
 ## Copyright
 
-(C) Copyright 2019, Jan Willem Janssen.
+(C) Copyright 2020, Jan Willem Janssen.
