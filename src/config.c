@@ -103,7 +103,44 @@ static int init_config(config_t *cfg) {
     return 0;
 }
 
-config_t *read_config(const char *file) {
+void dump_config(void *config) {
+    config_t *cfg = config;
+
+    log_debug("Using configuration:");
+    log_debug("- daemon user/group: %d/%d", cfg->priv_user, cfg->priv_group);
+    log_debug("- GPSD server: %s:%s", cfg->gpsd_host, cfg->gpsd_port);
+    if (cfg->gpsd_device) {
+        log_debug("  - device: %s", cfg->gpsd_device);
+    }
+    log_debug("- MQTT server: %s:%d", cfg->mqtt_host, cfg->mqtt_port);
+    log_debug("  - client ID: %s", cfg->client_id);
+    log_debug("  - MQTT QoS: %d", cfg->qos);
+    log_debug("  - retain messages: %s", cfg->retain ? "yes" : "no");
+    if (cfg->use_auth) {
+        log_debug("  - using client credentials");
+    }
+    if (cfg->use_tls) {
+        log_debug("- using TLS options:");
+        log_debug("  - use TLS version: %s", cfg->tls_version);
+        if (cfg->cacertpath) {
+            log_debug("  - CA cert path: %s", cfg->cacertpath);
+        }
+        if (cfg->cacertfile) {
+            log_debug("  - CA cert file: %s", cfg->cacertfile);
+        }
+        if (cfg->certfile) {
+            log_debug("  - using client certificate: %s", cfg->certfile);
+        }
+        log_debug("  - verify peer: %s", cfg->verify_peer ? "yes" : "no");
+        if (cfg->ciphers) {
+            log_debug("  - cipher suite: %s", cfg->ciphers);
+        }
+    }
+}
+
+void *read_config(const char *file, void *current_config) {
+    (void)current_config; // not using this one...
+
     config_t *cfg = NULL;
     yaml_parser_t parser = { 0 };
     yaml_event_t event = { 0 };
@@ -345,27 +382,29 @@ cleanup:
     return cfg;
 }
 
-void free_config(config_t *config) {
+void free_config(void *config) {
     if (!config) {
         return;
     }
 
-    free(config->gpsd_host);
-    free(config->gpsd_port);
-    free(config->gpsd_device);
+    config_t *cfg = config;
 
-    free(config->client_id);
-    free(config->mqtt_host);
+    free(cfg->gpsd_host);
+    free(cfg->gpsd_port);
+    free(cfg->gpsd_device);
 
-    free(config->username);
-    free(config->password);
+    free(cfg->client_id);
+    free(cfg->mqtt_host);
 
-    free(config->cacertfile);
-    free(config->cacertpath);
-    free(config->certfile);
-    free(config->keyfile);
-    free(config->tls_version);
-    free(config->ciphers);
+    free(cfg->username);
+    free(cfg->password);
 
-    free(config);
+    free(cfg->cacertfile);
+    free(cfg->cacertpath);
+    free(cfg->certfile);
+    free(cfg->keyfile);
+    free(cfg->tls_version);
+    free(cfg->ciphers);
+
+    free(cfg);
 }

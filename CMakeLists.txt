@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.15)
 
 project(
     gpsstats
@@ -8,11 +8,13 @@ project(
 
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
-# We depend on libudaemon, libyaml, libgpsd and mosquitto
-find_package(udaemon 0.6 REQUIRED)
-find_package(LibYAML 0.2 REQUIRED)
-find_package(LibGPS 3.19 REQUIRED)
-find_package(Mosquitto 1.5 REQUIRED)
+find_package(PkgConfig)
+# We depend on libyaml, libgps and mosquitto
+pkg_search_module(PKG_LIBYAML REQUIRED IMPORTED_TARGET yaml>=0.2 yaml-0.1>=0.2)
+pkg_search_module(PKG_LIBGPS REQUIRED IMPORTED_TARGET libgps>=3.19)
+pkg_search_module(PKG_LIBMOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto>=1.5)
+# We depend on libudaemon as well
+find_package(udaemon 0.7 REQUIRED)
 
 # Generate the gpsstats.h file with the current information
 configure_file(
@@ -42,11 +44,11 @@ target_compile_features(gpsstats
 )
 
 target_link_libraries(gpsstats
-    PUBLIC
+    PRIVATE
         udaemon::udaemon
-        LibYAML::LibYAML
-        LibGPS::LibGPS
-        Mosquitto::Mosquitto
+        PkgConfig::PKG_LIBYAML
+        PkgConfig::PKG_LIBGPS
+        PkgConfig::PKG_LIBMOSQUITTO
 )
 
 ###EOF###

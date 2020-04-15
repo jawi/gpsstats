@@ -44,39 +44,6 @@ static run_state_t _run_state = {
     .mqtt_event_handler_id = UD_INVALID_ID,
 };
 
-static void dump_config(config_t *config) {
-    log_debug("Using configuration:");
-    log_debug("- daemon user/group: %d/%d", config->priv_user, config->priv_group);
-    log_debug("- GPSD server: %s:%s", config->gpsd_host, config->gpsd_port);
-    if (config->gpsd_device) {
-        log_debug("  - device: %s", config->gpsd_device);
-    }
-    log_debug("- MQTT server: %s:%d", config->mqtt_host, config->mqtt_port);
-    log_debug("  - client ID: %s", config->client_id);
-    log_debug("  - MQTT QoS: %d", config->qos);
-    log_debug("  - retain messages: %s", config->retain ? "yes" : "no");
-    if (config->use_auth) {
-        log_debug("  - using client credentials");
-    }
-    if (config->use_tls) {
-        log_debug("- using TLS options:");
-        log_debug("  - use TLS version: %s", config->tls_version);
-        if (config->cacertpath) {
-            log_debug("  - CA cert path: %s", config->cacertpath);
-        }
-        if (config->cacertfile) {
-            log_debug("  - CA cert file: %s", config->cacertfile);
-        }
-        if (config->certfile) {
-            log_debug("  - using client certificate: %s", config->certfile);
-        }
-        log_debug("  - verify peer: %s", config->verify_peer ? "yes" : "no");
-        if (config->ciphers) {
-            log_debug("  - cipher suite: %s", config->ciphers);
-        }
-    }
-}
-
 static void gpsstats_gps_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context);
 static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd, void *context);
 
@@ -247,51 +214,21 @@ static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd, 
     }
 }
 
-static int gpsstats_load_config(ud_state_t *ud_state, run_state_t *run_state) {
-    config_t *new_config = read_config(run_state->conf_file);
-    if (new_config == NULL) {
-        log_warning("Unable to load configuration file?!");
-        return -EINVAL;
-    }
-
-    config_t *old_config = run_state->config;
-    // Update current configuration...
-    run_state->config = new_config;
-
-    if (old_config) {
-        free_config(old_config);
-    }
-
-    dump_config(run_state->config);
+// Initializes GPSStats
+static int gpsstats_init(ud_state_t *ud_state) {
+    // Dump the configuration when running in debug mode...
+    dump_config(ud_get_app_config(ud_state));
 
     // Connect to both services...
-    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, run_state)) {
+    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, &_run_state)) {
         log_warning("Failed to register connect task for MQTT?!");
     }
 
-    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, run_state)) {
+    if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, &_run_state)) {
         log_warning("Failed to register connect task for GPSD?!");
     }
 
     return 0;
-}
-
-// Initializes GPSStats
-static int gpsstats_init(ud_state_t *ud_state) {
-    if (gpsstats_load_config(ud_state, &_run_state)) {
-        log_warning("Initialization failed!");
-        return -EINVAL;
-    }
-
-    return 0;
-}
-
-static void gpsstats_reload_config(ud_state_t *ud_state, run_state_t *run_state) {
-    log_info("Reloading configuration file...");
-
-    if (gpsstats_load_config(ud_state, run_state)) {
-        log_warning("Reload of configuration failed!");
-    }
 }
 
 static void gpsstats_dump_stats(ud_state_t *ud_state, run_state_t *run_state) {
@@ -315,7 +252,12 @@ static void gpsstats_dump_stats(ud_state_t *ud_state, run_state_t *run_state) {
 
 static void gpsstats_signal_handler(ud_state_t *ud_state, ud_signal_t signal) {
     if (signal == SIG_HUP) {
-        gpsstats_reload_config(ud_state, &_run_state);
+        // Dump the configuration when running in debug mode...
+        dump_config(ud_get_app_config(ud_state));
+
+        // reconnect to both GPSD & MQTT...
+        gpsstats_reconnect_gpsd(ud_state, 0, &_run_state);
+        gpsstats_reconnect_mqtt(ud_state, 0, &_run_state);
     } else if (signal == SIG_USR1) {
         gpsstats_dump_stats(ud_state, &_run_state);
     }
@@ -352,6 +294,9 @@ int main(int argc, char *argv[]) {
         .initialize = gpsstats_init,
         .signal_handler = gpsstats_signal_handler,
         .cleanup = gpsstats_cleanup,
+        // configuration handling...
+        .config_parser = read_config,
+        .config_cleanup = free_config,
     };
 
     // parse arguments...

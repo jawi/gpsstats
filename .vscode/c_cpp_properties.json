@@ -3,7 +3,7 @@
         {
             "name": "Linux",
             "includePath": [
-                "src/inc/**"
+                "include/**"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang",
