@@ -51,4 +51,11 @@ target_link_libraries(gpsstats
         PkgConfig::PKG_LIBMOSQUITTO
 )
 
+# Installation 
+
+include(GNUInstallDirs)
+install(TARGETS gpsstats
+    RUNTIME DESTINATION bin
+)
+
 ###EOF###
