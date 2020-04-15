@@ -105,6 +105,9 @@ static int init_config(config_t *cfg) {
 
 void dump_config(void *config) {
     config_t *cfg = config;
+    if (!cfg) {
+        return;
+    }
 
     log_debug("Using configuration:");
     log_debug("- daemon user/group: %d/%d", cfg->priv_user, cfg->priv_group);

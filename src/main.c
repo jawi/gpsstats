@@ -216,9 +216,6 @@ static void gpsstats_mqtt_callback(ud_state_t *ud_state, struct pollfd *pollfd, 
 
 // Initializes GPSStats
 static int gpsstats_init(ud_state_t *ud_state) {
-    // Dump the configuration when running in debug mode...
-    dump_config(ud_get_app_config(ud_state));
-
     // Connect to both services...
     if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, &_run_state)) {
         log_warning("Failed to register connect task for MQTT?!");
