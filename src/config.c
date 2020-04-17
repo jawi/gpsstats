@@ -22,7 +22,6 @@
 
 typedef enum config_block {
     ROOT = 0,
-    DAEMON,
     GPSD,
     MQTT,
     MQTT_AUTH,
@@ -59,18 +58,6 @@ static inline bool safe_atob(const char *val) {
     return strncasecmp(val, "true", 4) == 0 || strncasecmp(val, "yes", 3) == 0;
 }
 
-static int init_priv_user(config_t *cfg) {
-    struct passwd *pwd = getpwnam("nobody");
-    if (pwd) {
-        cfg->priv_user = pwd->pw_uid;
-        cfg->priv_group = pwd->pw_gid;
-    } else {
-        log_error("unable to get user nobody: %p");
-        return -1;
-    }
-    return 0;
-}
-
 static int init_config(config_t *cfg) {
     cfg->gpsd_host = NULL;
     cfg->gpsd_port = 0;
@@ -96,21 +83,16 @@ static int init_config(config_t *cfg) {
     cfg->ciphers = NULL;
     cfg->verify_peer = true;
 
-    if (init_priv_user(cfg)) {
-        return -1;
-    }
-
     return 0;
 }
 
-void dump_config(void *config) {
-    config_t *cfg = config;
+void dump_config(const void *config) {
+    const config_t *cfg = config;
     if (!cfg) {
         return;
     }
 
     log_debug("Using configuration:");
-    log_debug("- daemon user/group: %d/%d", cfg->priv_user, cfg->priv_group);
     log_debug("- GPSD server: %s:%s", cfg->gpsd_host, cfg->gpsd_port);
     if (cfg->gpsd_device) {
         log_debug("  - device: %s", cfg->gpsd_device);
@@ -141,7 +123,7 @@ void dump_config(void *config) {
     }
 }
 
-void *read_config(const char *file, void *current_config) {
+void *read_config(const char *file, const void *current_config) {
     (void)current_config; // not using this one...
 
     config_t *cfg = NULL;
@@ -224,9 +206,7 @@ void *read_config(const char *file, void *current_config) {
             size_t len = event.data.scalar.length;
             const char *val = (char *)event.data.scalar.value;
 
-            if (VALUE_IN_CONTEXT("daemon", ROOT)) {
-                cblock = DAEMON;
-            } else if (VALUE_IN_CONTEXT("gpsd", ROOT)) {
+            if (VALUE_IN_CONTEXT("gpsd", ROOT)) {
                 cblock = GPSD;
             } else if (VALUE_IN_CONTEXT("mqtt", ROOT)) {
                 cblock = MQTT;
@@ -239,22 +219,7 @@ void *read_config(const char *file, void *current_config) {
                 key[len] = 0;
                 key_expected = false;
             } else {
-                if (KEY_IN_CONTEXT("user", DAEMON)) {
-                    struct passwd *pwd = getpwnam(val);
-                    if (pwd) {
-                        cfg->priv_user = pwd->pw_uid;
-                        cfg->priv_group = pwd->pw_gid;
-                    } else {
-                        PARSE_ERROR("invalid configuration file: unknown user '%s'", val);
-                    }
-                } else if (KEY_IN_CONTEXT("group", DAEMON)) {
-                    struct group *grp = getgrnam(val);
-                    if (grp) {
-                        cfg->priv_group = grp->gr_gid;
-                    } else {
-                        PARSE_ERROR("invalid configuriation file: unknown group '%s'", val);
-                    }
-                } else if (KEY_IN_CONTEXT("host", GPSD)) {
+                if (KEY_IN_CONTEXT("host", GPSD)) {
                     cfg->gpsd_host = safe_strdup(val);
                 } else if (KEY_IN_CONTEXT("port", GPSD)) {
                     int32_t n = safe_atoi(val);
