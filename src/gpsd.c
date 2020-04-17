@@ -128,7 +128,7 @@ int gpsd_connect(gpsd_handle_t *handle) {
 
     int status;
     if ((status = gps_open(handle->host, handle->port, &handle->gpsd)) < 0) {
-        log_error("no gpsd running or network error: %s", GPSD_ERROR(status));
+        log_error("no GPSD running or network error: %s", GPSD_ERROR(status));
         return -ENOTCONN;
     }
 
@@ -140,6 +140,8 @@ int gpsd_connect(gpsd_handle_t *handle) {
         log_error("failed to set GPS stream options: %s", GPSD_ERROR(status));
         return -ENOTCONN;
     }
+
+    log_info("connected to GPSD...");
 
     return 0;
 }
@@ -162,6 +164,8 @@ int gpsd_disconnect(gpsd_handle_t *handle) {
     if ((status = gps_close(&handle->gpsd)) < 0) {
         log_debug("Failed to close handle to GPSD: %s", GPSD_ERROR(status));
     }
+
+    log_info("disconnected from GPSD...");
 
     return 0;
 }
