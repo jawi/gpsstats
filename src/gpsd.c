@@ -21,6 +21,19 @@
 #define GPSD_ERROR(s) \
     ((errno) ? strerror(errno) : gps_errstr(s))
 
+#ifndef GNSSID_CNT
+/* copied from gpsd-3.17: defines for u-blox gnssId, as used in satellite_t */
+#define GNSSID_GPS 0
+#define GNSSID_SBAS 1
+#define GNSSID_GAL 2
+#define GNSSID_BD 3
+#define GNSSID_IMES 4
+#define GNSSID_QZSS 5
+#define GNSSID_GLO 6
+#define GNSSID_IRNSS 7            /* Not defined by u-blox */
+#define GNSSID_CNT 8              /* count for array size */
+#endif
+
 static const char* gnssid_name[GNSSID_CNT] = {
     "gps",
     "sbas",
@@ -67,12 +80,30 @@ static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
             snr_total += data->skyview[i].ss;
         }
 
+#if GPSD_API_MAJOR_VERSION >= 8
         if (data->skyview[i].svid != 0) {
             uint8_t gnssid = data->skyview[i].gnssid;
             if (gnssid < GNSSID_CNT) {
                 sats_seen[gnssid]++;
             }
         }
+#else
+        int gnssid = -1;
+        short prn = data->skyview[i].PRN;
+
+        if (GPS_PRN(prn)) {
+            gnssid = GNSSID_GPS;
+        } else if (GBAS_PRN(prn)) {
+            gnssid = GNSSID_GLO;
+        } else if (SBAS_PRN(prn)) {
+            gnssid = GNSSID_SBAS;
+        } else if (GNSS_PRN(prn)) {
+            gnssid = GNSSID_BD;
+        }
+        if (gnssid >= 0 && gnssid < GNSSID_CNT) {
+            sats_seen[gnssid]++;
+        }
+#endif
     }
     if (data->satellites_used > 0) {
         snr_avg = snr_total / data->satellites_used;
@@ -88,7 +119,11 @@ static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
 
     // Update our local stats...
     handle->time = data->fix.time;
+#if GPSD_API_MAJOR_VERSION >= 8
     handle->qErr = data->fix.qErr;
+#else
+    handle->qErr = 0;
+#endif
     handle->sats_used = data->satellites_used;
     handle->sats_visible = data->satellites_visible;
     handle->tdop = data->dop.tdop;
@@ -235,7 +270,11 @@ int gpsd_read_data(gpsd_handle_t *handle, char **result) {
         return -EINVAL;
     }
 
+#if GPSD_API_MAJOR_VERSION >= 8
     int status = gps_read(&handle->gpsd, NULL, 0);
+#else
+    int status = gps_read(&handle->gpsd);
+#endif
     if (status < 0) {
         log_warning("Failed to read from GPSD: %s", GPSD_ERROR(status));
         return -ENOTCONN;
