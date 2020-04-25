@@ -129,7 +129,7 @@ for example (output is formatted for readability):
 
 ```json
 {
-   "time":1580727836,
+   "time":1587837604.000000000,
    "sats_used":12,
    "sats_visible":23,
    "tdop":0.830000,

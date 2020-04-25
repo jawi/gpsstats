@@ -51,7 +51,11 @@ struct gpsd_handle {
     char *port;
     char *device;
 
+#if GPSD_API_MAJOR_VERSION >= 9
+    timespec_t time;
+#else
     timestamp_t time;
+#endif
     int sats_visible;
     int sats_used;
     long qErr;
@@ -119,7 +123,9 @@ static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
 
     // Update our local stats...
     handle->time = data->fix.time;
-#if GPSD_API_MAJOR_VERSION >= 8
+#if GPSD_API_MAJOR_VERSION >= 9
+    handle->qErr = data->qErr;
+#elif GPSD_API_MAJOR_VERSION >= 8
     handle->qErr = data->fix.qErr;
 #else
     handle->qErr = 0;
@@ -128,6 +134,12 @@ static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
     handle->sats_visible = data->satellites_visible;
     handle->tdop = data->dop.tdop;
     handle->avg_snr = snr_avg;
+
+#if GPSD_API_MAJOR_VERSION >= 9
+    TS_SUB(&handle->toff_diff, &data->toff.clock, &data->toff.real);
+    TS_SUB(&handle->pps_diff, &data->pps.clock, &data->pps.real);
+#endif
+
     memcpy(handle->sats_seen, sats_seen, sizeof(sats_seen));
 
     return true;
@@ -239,8 +251,15 @@ static int create_event_payload(gpsd_handle_t *handle, char **buffer) {
 
     *buffer = malloc(buffer_size * sizeof(char));
 
-    BUFFER_ADD("{\"time\":%.0f,\"sats_used\":%d,\"sats_visible\":%d,\"tdop\":%f,\"avg_snr\":%f",
-               handle->time,
+    BUFFER_ADD("{");
+
+#if GPSD_API_MAJOR_VERSION >= 9
+    BUFFER_ADD("\"time\":%ld.%.9ld", handle->time.tv_sec, handle->time.tv_nsec);
+#elif GPSD_API_MAJOR_VERSION >= 8
+    BUFFER_ADD("\"time\":%.9f", handle->time);
+#endif
+
+    BUFFER_ADD(",\"sats_used\":%d,\"sats_visible\":%d,\"tdop\":%f,\"avg_snr\":%f",
                handle->sats_used,
                handle->sats_visible,
                handle->tdop,
@@ -300,6 +319,7 @@ int gpsd_read_data(gpsd_handle_t *handle, char **result) {
                   handle->gpsd.version.rev);
     }
 
+#if GPSD_API_MAJOR_VERSION < 9
     if (handle->gpsd.set & TOFF_SET) {
         TS_SUB(&handle->toff_diff, &handle->gpsd.toff.clock, &handle->gpsd.toff.real);
     }
@@ -307,6 +327,7 @@ int gpsd_read_data(gpsd_handle_t *handle, char **result) {
     if (handle->gpsd.set & PPS_SET) {
         TS_SUB(&handle->pps_diff, &handle->gpsd.pps.clock, &handle->gpsd.pps.real);
     }
+#endif
 
     if ((handle->gpsd.fix.mode > MODE_NO_FIX) &&
             (handle->gpsd.satellites_used > 0) &&
