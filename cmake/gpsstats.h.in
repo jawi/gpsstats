@@ -8,8 +8,8 @@
 #ifndef _GPSSTATS_H
 #define _GPSSTATS_H
 
-#define PROGNAME "gpsstats"
-#define VERSION "0.2.0"
+#define PROGNAME "@CMAKE_PROJECT_NAME@"
+#define VERSION "@gpsstats_VERSION@"
 #define CONF_FILE "/etc/" PROGNAME ".cfg"
 #define PID_FILE "/var/run/" PROGNAME ".pid"
 

@@ -1,0 +1,8 @@
+{
+    "cmake.configureSettings": {
+        "udaemon_DIR": "/home/jawi/opt/libudaemon/lib/cmake/udaemon/"
+    },
+    "cmake.environment": {
+        "PKG_CONFIG_PATH": "/home/jawi/opt/gpsd/lib/pkgconfig"
+    }
+}

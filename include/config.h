@@ -13,9 +13,6 @@
 #include <sys/types.h>
 
 typedef struct config {
-    uid_t priv_user;
-    gid_t priv_group;
-
     char *gpsd_host;
     char *gpsd_port;
     char *gpsd_device;
@@ -44,16 +41,24 @@ typedef struct config {
 /**
  * Reads the configuration from the given file.
  *
- * @param file the configuration file to read, cannot be null.
+ * @param file the configuration file to read, cannot be NULL;
+ * @param config the current configuration, may be NULL;
  * @return the configuration object, or NULL in case of reading failures.
  */
-config_t *read_config(const char *file);
+void *read_config(const char *file, const void *config);
 
 /**
  * Free all resources taken up by the given configuration.
  *
- * @param config the configuration object to free, may be null.
+ * @param config the configuration object to free, may be NULL.
  */
-void free_config(config_t *config);
+void free_config(void *config);
+
+/**
+ * Dumps the configuration to the logging facility (at debug level).
+ * 
+ * @param config the configuration to dump, cannot be NULL.
+ */
+void dump_config(const void *config);
 
 #endif /* CONFIG_H_ */

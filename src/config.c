@@ -16,13 +16,12 @@
 #include <sys/types.h>
 
 #include <yaml.h>
+#include <udaemon/ud_logging.h>
 
 #include "config.h"
-#include "logging.h"
 
 typedef enum config_block {
     ROOT = 0,
-    DAEMON,
     GPSD,
     MQTT,
     MQTT_AUTH,
@@ -59,18 +58,6 @@ static inline bool safe_atob(const char *val) {
     return strncasecmp(val, "true", 4) == 0 || strncasecmp(val, "yes", 3) == 0;
 }
 
-static int init_priv_user(config_t *cfg) {
-    struct passwd *pwd = getpwnam("nobody");
-    if (pwd) {
-        cfg->priv_user = pwd->pw_uid;
-        cfg->priv_group = pwd->pw_gid;
-    } else {
-        log_error("unable to get user nobody: %p");
-        return -1;
-    }
-    return 0;
-}
-
 static int init_config(config_t *cfg) {
     cfg->gpsd_host = NULL;
     cfg->gpsd_port = 0;
@@ -96,14 +83,49 @@ static int init_config(config_t *cfg) {
     cfg->ciphers = NULL;
     cfg->verify_peer = true;
 
-    if (init_priv_user(cfg)) {
-        return -1;
-    }
-
     return 0;
 }
 
-config_t *read_config(const char *file) {
+void dump_config(const void *config) {
+    const config_t *cfg = config;
+    if (!cfg) {
+        return;
+    }
+
+    log_debug("Using configuration:");
+    log_debug("- GPSD server: %s:%s", cfg->gpsd_host, cfg->gpsd_port);
+    if (cfg->gpsd_device) {
+        log_debug("  - device: %s", cfg->gpsd_device);
+    }
+    log_debug("- MQTT server: %s:%d", cfg->mqtt_host, cfg->mqtt_port);
+    log_debug("  - client ID: %s", cfg->client_id);
+    log_debug("  - MQTT QoS: %d", cfg->qos);
+    log_debug("  - retain messages: %s", cfg->retain ? "yes" : "no");
+    if (cfg->use_auth) {
+        log_debug("  - using client credentials");
+    }
+    if (cfg->use_tls) {
+        log_debug("- using TLS options:");
+        log_debug("  - use TLS version: %s", cfg->tls_version);
+        if (cfg->cacertpath) {
+            log_debug("  - CA cert path: %s", cfg->cacertpath);
+        }
+        if (cfg->cacertfile) {
+            log_debug("  - CA cert file: %s", cfg->cacertfile);
+        }
+        if (cfg->certfile) {
+            log_debug("  - using client certificate: %s", cfg->certfile);
+        }
+        log_debug("  - verify peer: %s", cfg->verify_peer ? "yes" : "no");
+        if (cfg->ciphers) {
+            log_debug("  - cipher suite: %s", cfg->ciphers);
+        }
+    }
+}
+
+void *read_config(const char *file, const void *current_config) {
+    (void)current_config; // not using this one...
+
     config_t *cfg = NULL;
     yaml_parser_t parser = { 0 };
     yaml_event_t event = { 0 };
@@ -184,9 +206,7 @@ config_t *read_config(const char *file) {
             size_t len = event.data.scalar.length;
             const char *val = (char *)event.data.scalar.value;
 
-            if (VALUE_IN_CONTEXT("daemon", ROOT)) {
-                cblock = DAEMON;
-            } else if (VALUE_IN_CONTEXT("gpsd", ROOT)) {
+            if (VALUE_IN_CONTEXT("gpsd", ROOT)) {
                 cblock = GPSD;
             } else if (VALUE_IN_CONTEXT("mqtt", ROOT)) {
                 cblock = MQTT;
@@ -199,22 +219,7 @@ config_t *read_config(const char *file) {
                 key[len] = 0;
                 key_expected = false;
             } else {
-                if (KEY_IN_CONTEXT("user", DAEMON)) {
-                    struct passwd *pwd = getpwnam(val);
-                    if (pwd) {
-                        cfg->priv_user = pwd->pw_uid;
-                        cfg->priv_group = pwd->pw_gid;
-                    } else {
-                        PARSE_ERROR("invalid configuration file: unknown user '%s'", val);
-                    }
-                } else if (KEY_IN_CONTEXT("group", DAEMON)) {
-                    struct group *grp = getgrnam(val);
-                    if (grp) {
-                        cfg->priv_group = grp->gr_gid;
-                    } else {
-                        PARSE_ERROR("invalid configuriation file: unknown group '%s'", val);
-                    }
-                } else if (KEY_IN_CONTEXT("host", GPSD)) {
+                if (KEY_IN_CONTEXT("host", GPSD)) {
                     cfg->gpsd_host = safe_strdup(val);
                 } else if (KEY_IN_CONTEXT("port", GPSD)) {
                     int32_t n = safe_atoi(val);
@@ -345,27 +350,29 @@ cleanup:
     return cfg;
 }
 
-void free_config(config_t *config) {
+void free_config(void *config) {
     if (!config) {
         return;
     }
 
-    free(config->gpsd_host);
-    free(config->gpsd_port);
-    free(config->gpsd_device);
+    config_t *cfg = config;
 
-    free(config->client_id);
-    free(config->mqtt_host);
+    free(cfg->gpsd_host);
+    free(cfg->gpsd_port);
+    free(cfg->gpsd_device);
 
-    free(config->username);
-    free(config->password);
+    free(cfg->client_id);
+    free(cfg->mqtt_host);
 
-    free(config->cacertfile);
-    free(config->cacertpath);
-    free(config->certfile);
-    free(config->keyfile);
-    free(config->tls_version);
-    free(config->ciphers);
+    free(cfg->username);
+    free(cfg->password);
 
-    free(config);
+    free(cfg->cacertfile);
+    free(cfg->cacertpath);
+    free(cfg->certfile);
+    free(cfg->keyfile);
+    free(cfg->tls_version);
+    free(cfg->ciphers);
+
+    free(cfg);
 }

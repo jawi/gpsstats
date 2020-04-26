@@ -12,7 +12,7 @@
 
 // The following code is taken from gpsd's timespec.h
 
-#define NS_IN_SEC       1000000000LL     /* nanoseconds in a second */
+#define NS_IN_SEC       1000000000L     /* nanoseconds in a second */
 
 static inline void TS_NORM(struct timespec *ts) {
     if ((1 <= ts->tv_sec) || ((0 == ts->tv_sec) && (0 <= ts->tv_nsec))) {
