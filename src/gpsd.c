@@ -51,99 +51,13 @@ struct gpsd_handle {
     char *port;
     char *device;
 
-#if GPSD_API_MAJOR_VERSION >= 9
-    timespec_t time;
-#else
-    timestamp_t time;
-#endif
-    int sats_visible;
-    int sats_used;
-    long qErr;
-    double tdop;
-    double avg_snr;
     struct timespec toff_diff;
     struct timespec pps_diff;
-    uint8_t sats_seen[GNSSID_CNT];
 
     uint32_t gpsd_events_recv;
     uint32_t gpsd_events_send;
     time_t gpsd_last_event;
 };
-
-static bool gps_stats_changed(gpsd_handle_t *handle, struct gps_data_t *data) {
-    double snr_total = 0;
-    double snr_avg = 0;
-    uint8_t sats_seen[GNSSID_CNT] = { 0 };
-
-    for(int i = 0; i <= data->satellites_visible; i++) {
-        if (!data->skyview[i].used) {
-            continue;
-        }
-
-        if (data->skyview[i].ss > 1) {
-            snr_total += data->skyview[i].ss;
-        }
-
-#if GPSD_API_MAJOR_VERSION >= 8
-        if (data->skyview[i].svid != 0) {
-            uint8_t gnssid = data->skyview[i].gnssid;
-            if (gnssid < GNSSID_CNT) {
-                sats_seen[gnssid]++;
-            }
-        }
-#else
-        int gnssid = -1;
-        short prn = data->skyview[i].PRN;
-
-        if (GPS_PRN(prn)) {
-            gnssid = GNSSID_GPS;
-        } else if (GBAS_PRN(prn)) {
-            gnssid = GNSSID_GLO;
-        } else if (SBAS_PRN(prn)) {
-            gnssid = GNSSID_SBAS;
-        } else if (GNSS_PRN(prn)) {
-            gnssid = GNSSID_BD;
-        }
-        if (gnssid >= 0 && gnssid < GNSSID_CNT) {
-            sats_seen[gnssid]++;
-        }
-#endif
-    }
-    if (data->satellites_used > 0) {
-        snr_avg = snr_total / data->satellites_used;
-    }
-
-    if ((handle->sats_used == data->satellites_used) &&
-            (handle->sats_visible == data->satellites_visible) &&
-            (handle->tdop == data->dop.tdop) &&
-            (handle->avg_snr == snr_avg) &&
-            memcmp(handle->sats_seen, sats_seen, sizeof(sats_seen)) == 0) {
-        return false;
-    }
-
-    // Update our local stats...
-    handle->time = data->fix.time;
-#if GPSD_API_MAJOR_VERSION >= 9
-    handle->qErr = data->qErr;
-#elif GPSD_API_MAJOR_VERSION >= 8
-    handle->qErr = data->fix.qErr;
-#else
-    handle->qErr = 0;
-#endif
-    handle->sats_used = data->satellites_used;
-    handle->sats_visible = data->satellites_visible;
-    handle->tdop = data->dop.tdop;
-    handle->avg_snr = snr_avg;
-
-#if GPSD_API_MAJOR_VERSION >= 9
-    TS_SUB(&handle->toff_diff, &data->toff.clock, &data->toff.real);
-    TS_SUB(&handle->pps_diff, &data->pps.clock, &data->pps.real);
-#endif
-
-    memcpy(handle->sats_seen, sats_seen, sizeof(sats_seen));
-
-    return true;
-}
 
 gpsd_handle_t *gpsd_init(const config_t *config) {
     gpsd_handle_t *handle = malloc(sizeof(gpsd_handle_t));
@@ -246,6 +160,48 @@ int gpsd_fd(gpsd_handle_t *handle) {
   } while (0)
 
 static int create_event_payload(gpsd_handle_t *handle, char **buffer) {
+    double snr_total = 0;
+    double snr_avg = 0;
+    uint8_t sats_seen[GNSSID_CNT] = { 0 };
+
+    for(int i = 0; i <= handle->gpsd.satellites_visible; i++) {
+        if (!handle->gpsd.skyview[i].used) {
+            continue;
+        }
+
+        if (handle->gpsd.skyview[i].ss >= 0) {
+            snr_total += handle->gpsd.skyview[i].ss;
+        }
+
+#if GPSD_API_MAJOR_VERSION >= 8
+        if (handle->gpsd.skyview[i].svid != 0) {
+            uint8_t gnssid = handle->gpsd.skyview[i].gnssid;
+            if (gnssid < GNSSID_CNT) {
+                sats_seen[gnssid]++;
+            }
+        }
+#else
+        int gnssid = -1;
+        short prn = handle->gpsd.skyview[i].PRN;
+
+        if (GPS_PRN(prn)) {
+            gnssid = GNSSID_GPS;
+        } else if (GBAS_PRN(prn)) {
+            gnssid = GNSSID_GLO;
+        } else if (SBAS_PRN(prn)) {
+            gnssid = GNSSID_SBAS;
+        } else if (GNSS_PRN(prn)) {
+            gnssid = GNSSID_BD;
+        }
+        if (gnssid >= 0 && gnssid < GNSSID_CNT) {
+            sats_seen[gnssid]++;
+        }
+#endif
+    }
+    if (handle->gpsd.satellites_used > 0) {
+        snr_avg = snr_total / handle->gpsd.satellites_used;
+    }
+
     size_t offset = 0;
     size_t buffer_size = INITIAL_BUFFER_SIZE;
 
@@ -254,28 +210,49 @@ static int create_event_payload(gpsd_handle_t *handle, char **buffer) {
     BUFFER_ADD("{");
 
 #if GPSD_API_MAJOR_VERSION >= 9
-    BUFFER_ADD("\"time\":%ld.%.9ld", handle->time.tv_sec, handle->time.tv_nsec);
+    BUFFER_ADD("\"time\":%ld.%.9ld", handle->gpsd.fix.time.tv_sec, handle->gpsd.fix.time.tv_nsec);
 #elif GPSD_API_MAJOR_VERSION >= 8
-    BUFFER_ADD("\"time\":%.9f", handle->time);
+    BUFFER_ADD("\"time\":%.9f", handle->gpsd.fix.time);
 #endif
 
     BUFFER_ADD(",\"sats_used\":%d,\"sats_visible\":%d,\"tdop\":%f,\"avg_snr\":%f",
-               handle->sats_used,
-               handle->sats_visible,
-               handle->tdop,
-               handle->avg_snr);
+               handle->gpsd.satellites_used,
+               handle->gpsd.satellites_visible,
+               handle->gpsd.dop.tdop,
+               snr_avg);
 
-    if (handle->qErr) {
-        BUFFER_ADD(",\"qErr\":%ld", handle->qErr);
+    long qErr = 0;
+#if GPSD_API_MAJOR_VERSION >= 9
+    qErr = handle->gpsd.qErr;
+#elif GPSD_API_MAJOR_VERSION >= 8
+    qErr = data->fix.qErr;
+#endif
+
+    if (qErr != 0) {
+        BUFFER_ADD(",\"qErr\":%ld", qErr);
     }
 
     BUFFER_ADD(",\"toff\":%f", TSTONS(&handle->toff_diff));
     BUFFER_ADD(",\"pps\":%f", TSTONS(&handle->pps_diff));
 
+    if (handle->gpsd.osc.running) {
+        if (handle->gpsd.osc.reference) {
+            BUFFER_ADD(",\"osc.pps\":true");
+        } else {
+            BUFFER_ADD(",\"osc.pps\":false");
+        }
+        if (handle->gpsd.osc.disciplined) {
+            BUFFER_ADD(",\"osc.gps\":true");
+        } else {
+            BUFFER_ADD(",\"osc.gps\":false");
+        }
+        BUFFER_ADD(",\"osc.delta\":%d", handle->gpsd.osc.delta);
+    }
+
     for (int i = 0; i < GNSSID_CNT; i++) {
-        uint8_t seen = handle->sats_seen[i];
+        uint8_t seen = sats_seen[i];
         if (seen > 0) {
-            BUFFER_ADD(",\"sats.%s\":%d", gnssid_name[i], handle->sats_seen[i]);
+            BUFFER_ADD(",\"sats.%s\":%d", gnssid_name[i], sats_seen[i]);
         }
     }
 
@@ -312,14 +289,22 @@ int gpsd_read_data(gpsd_handle_t *handle, char **result) {
     handle->gpsd_last_event = time(NULL);
 
     if (handle->gpsd.set & VERSION_SET) {
-        log_debug("Connected to GPSD with protocol v%d.%d (release local: %s, rev: %s)",
+        log_info("Connected to GPSD with protocol v%d.%d (release: %s)",
                   handle->gpsd.version.proto_major,
                   handle->gpsd.version.proto_minor,
-                  handle->gpsd.version.release,
-                  handle->gpsd.version.rev);
+                  handle->gpsd.version.release);
     }
 
-#if GPSD_API_MAJOR_VERSION < 9
+    if (!(handle->gpsd.set & PACKET_SET)) {
+        // nothing of interest...
+        return 0;
+    }
+
+
+#if GPSD_API_MAJOR_VERSION >= 9
+    TS_SUB(&handle->toff_diff, &handle->gpsd.toff.clock, &handle->gpsd.toff.real);
+    TS_SUB(&handle->pps_diff, &handle->gpsd.pps.clock, &handle->gpsd.pps.real);
+#else
     if (handle->gpsd.set & TOFF_SET) {
         TS_SUB(&handle->toff_diff, &handle->gpsd.toff.clock, &handle->gpsd.toff.real);
     }
@@ -329,9 +314,9 @@ int gpsd_read_data(gpsd_handle_t *handle, char **result) {
     }
 #endif
 
-    if ((handle->gpsd.fix.mode > MODE_NO_FIX) &&
-            (handle->gpsd.satellites_used > 0) &&
-            gps_stats_changed(handle, &handle->gpsd)) {
+    handle->gpsd.set = 0;
+
+    if ((handle->gpsd.fix.mode > MODE_NO_FIX) && (handle->gpsd.satellites_used > 0)) {
         // Update stats...
         handle->gpsd_events_send++;
 
