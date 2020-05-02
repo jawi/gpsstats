@@ -36,8 +36,8 @@ typedef struct {
     uint32_t mqtt_connects;
 } run_state_t;
 
-static void gpsstats_gps_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context);
-static void gpsstats_mqtt_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context);
+static ud_result_t gpsstats_gps_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context);
+static ud_result_t gpsstats_mqtt_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context);
 
 // task that disconnects from GPSD and reconnects to it...
 static int gpsstats_reconnect_gpsd(const ud_state_t *ud_state, const uint16_t interval, void *context) {
@@ -91,13 +91,16 @@ static int gpsstats_reconnect_gpsd(const ud_state_t *ud_state, const uint16_t in
 }
 
 // Called when data of gpsd is received...
-static void gpsstats_gps_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
+static ud_result_t gpsstats_gps_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
     run_state_t *run_state = context;
 
     int status;
     bool need_reconnect = false;
 
-    if (pollfd->revents & POLLIN) {
+    if ((pollfd->revents & (POLLHUP | POLLERR)) != 0) {
+        log_warning("GPSD closed unexpectedly! Remote end closed?");
+        need_reconnect = true;
+    } else if (pollfd->revents & POLLIN) {
         char *event = { 0 };
 
         status = gpsd_read_data(run_state->gpsd, &event);
@@ -110,13 +113,14 @@ static void gpsstats_gps_callback(const ud_state_t *ud_state, struct pollfd *pol
     }
 
     if (need_reconnect) {
-        // ensure we no longer get any results from poll() while we're reconnecting...
-        pollfd->events = 0;
-
         if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_gpsd, run_state)) {
             log_warning("Failed to register (re)connect task for GPSD?!");
         }
+
+        return RES_ERROR;
     }
+
+    return RES_OK;
 }
 
 // task that disconnects from MQTT and reconnects to it...
@@ -171,7 +175,7 @@ static int gpsstats_reconnect_mqtt(const ud_state_t *ud_state, const uint16_t in
 }
 
 // Called when data of mosquitto is received/to be transmitted...
-static void gpsstats_mqtt_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
+static ud_result_t gpsstats_mqtt_callback(const ud_state_t *ud_state, struct pollfd *pollfd, void *context) {
     run_state_t *run_state = context;
 
     if (mqtt_want_write(run_state->mqtt)) {
@@ -181,31 +185,37 @@ static void gpsstats_mqtt_callback(const ud_state_t *ud_state, struct pollfd *po
     } else if (pollfd->events & POLLOUT) {
         log_debug("Clearing MQTT data request...");
 
-        pollfd->events = pollfd->events & ~POLLOUT;
+        pollfd->events &= ~POLLOUT;
     }
 
     int status;
     bool need_reconnect = false;
 
-    if (pollfd->revents & POLLOUT) {
-        // We can write safely...
-        status = mqtt_write_data(run_state->mqtt);
-        need_reconnect |= (status == -ENOTCONN);
-    }
-    if (pollfd->revents & POLLIN) {
-        // We can read safely...
-        status = mqtt_read_data(run_state->mqtt);
-        need_reconnect |= (status == -ENOTCONN);
+    if ((pollfd->revents & (POLLHUP | POLLERR)) != 0) {
+        log_warning("GPSD closed unexpectedly! Remote end closed?");
+        need_reconnect = true;
+    } else {
+        if (pollfd->revents & POLLOUT) {
+            // We can write safely...
+            status = mqtt_write_data(run_state->mqtt);
+            need_reconnect |= (status == -ENOTCONN);
+        }
+        if (pollfd->revents & POLLIN) {
+            // We can read safely...
+            status = mqtt_read_data(run_state->mqtt);
+            need_reconnect |= (status == -ENOTCONN);
+        }
     }
 
     if (need_reconnect) {
-        // ensure we no longer get any results from poll() while we're reconnecting...
-        pollfd->events = 0;
-
         if (ud_schedule_task(ud_state, 1, gpsstats_reconnect_mqtt, run_state)) {
             log_warning("Failed to register (re)connect task for MQTT?!");
         }
+
+        return RES_ERROR;
     }
+
+    return RES_OK;
 }
 
 static int gpsstats_mqtt_misc_loop(const ud_state_t *ud_state, const uint16_t interval, void *context) {

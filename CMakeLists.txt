@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 
 project(
     gpsstats
-    VERSION 0.2.0
+    VERSION 0.6.0
     LANGUAGES C
 )
 
@@ -14,7 +14,7 @@ pkg_search_module(PKG_LIBYAML REQUIRED IMPORTED_TARGET yaml>=0.2 yaml-0.1>=0.2)
 pkg_search_module(PKG_LIBGPS REQUIRED IMPORTED_TARGET libgps>=3.17)
 pkg_search_module(PKG_LIBMOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto>=1.5)
 # We depend on libudaemon as well
-find_package(udaemon 0.8 REQUIRED)
+find_package(udaemon 0.10 REQUIRED)
 
 # Generate the gpsstats.h file with the current information
 configure_file(
